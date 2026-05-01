@@ -62,45 +62,55 @@ def get_ctx(scope: str, ctx_id: str) -> Optional[dict]:
 def is_auto_reply(message: str) -> bool:
     """Detect WhatsApp Business canned auto-replies."""
     AUTO_REPLY_PATTERNS = [
-        r"thank you for contacting",
-        r"thanks for (reaching out|contacting|messaging)",
-        r"we will (get back|respond|reply) (to you )?shortly",
+        r"thank you for (contacting|reaching out|messaging|your (message|inquiry))",
+        r"thanks for (reaching out|contacting|messaging|your (message|inquiry))",
+        r"we will (get back|respond|reply|contact you) (to you )?(shortly|soon|asap)",
         r"our team will",
         r"you have reached",
-        r"we are currently",
-        r"outside (of )?our (business|working) hours",
+        r"we are (currently|at the moment)",
+        r"outside (of )?our (business|working|office) hours",
         r"this is an automated",
+        r"auto.?reply",
+        r"out of office",
+        r"we appreciate your (patience|message)",
+        r"response time",
+        r"get back to you",
     ]
     msg_lower = message.lower()
-    return any(re.search(p, msg_lower) for p in AUTO_REPLY_PATTERNS)
+    return any(re.search(p, msg_lower, re.IGNORECASE) for p in AUTO_REPLY_PATTERNS)
 
 
 def is_hostile(message: str) -> bool:
     """Detect hostile / opt-out messages."""
     patterns = [
-        r"\bstop\b", r"\bblock\b", r"\bunsubscribe\b",
-        r"leave me alone", r"don.t (message|contact|bother)",
-        r"why are you (bothering|messaging|contacting)",
-        r"this is useless", r"not interested", r"go away",
-        r"\bspam\b",
+        r"\bstop\b", r"\bblock\b", r"\bunsubscribe\b", r"\bdelete\b",
+        r"leave me alone", r"don.?t (message|contact|bother|text|call)",
+        r"why are you (bothering|messaging|contacting|texting|calling)",
+        r"(this is |you.re )?useless", r"(not interested|not interested in|not needed)",
+        r"(go away|get lost)", r"\bspam\b", r"do not (contact|message|call)",
+        r"(remove|stop) (me|this|this number)",
+        r"(never|don.?t) (message|text|call) (me|again)",
     ]
     msg_lower = message.lower()
-    return any(re.search(p, msg_lower) for p in patterns)
+    return any(re.search(p, msg_lower, re.IGNORECASE) for p in patterns)
 
 
 def is_explicit_intent(message: str) -> bool:
     """Detect explicit 'let's go' / commit signals."""
     patterns = [
-        r"\blet.s do it\b", r"\bgo ahead\b", r"\byes please\b",
+        r"\blet.?s (do it|go|proceed|start|go ahead)\b",
+        r"\bgo ahead\b", r"\byes please\b", r"\bsure\b",
         r"\bconfirm\b", r"\bsend it\b", r"\bdo it\b",
-        r"\bsure\b", r"\byes\b", r"\bhaan\b", r"\bha\b",
-        r"\bok(ay)?\b", r"\bkaro\b", r"\bkarein\b",
+        r"\byes\b", r"\bhaan\b", r"\bha\b", r"\bhmmm?\b",
+        r"\bok(ay)?\b", r"\bkaro\b", r"\bkarein\b", r"\bthik hai\b",
+        r"\bstarted\b", r"\bproceed\b", r"send the (message|sms|text|draft)",
+        r"go for it", r"sounds good", r"let me do it", r"ready to",
     ]
     msg_lower = message.lower().strip()
-    return any(re.search(p, msg_lower) for p in patterns)
+    return any(re.search(p, msg_lower, re.IGNORECASE) for p in patterns)
 
 
-async def call_gemini(system: str, user: str, max_tokens: int = 500) -> str:
+async def call_gemini(system: str, user: str, max_tokens: int = 800) -> str:
     """Call Gemini 2.5 Flash API and return text."""
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -117,7 +127,7 @@ async def call_gemini(system: str, user: str, max_tokens: int = 500) -> str:
         ],
         "generationConfig": {
             "maxOutputTokens": max_tokens,
-            "temperature": 0,
+            "temperature": 0.3,
         }
     }
 
@@ -140,19 +150,16 @@ def build_system_prompt(category: dict, merchant: dict, trigger: dict, customer:
     voice = category.get("voice", {})
     peer = category.get("peer_stats", {})
     digest = category.get("digest", [])
-    offers = category.get("offer_catalog", [])
-    seasonal = category.get("seasonal_beats", [])
-    trends = category.get("trend_signals", [])
-    patient_lib = category.get("patient_content_library", [])
+    offers = category.get("offer_catalog", [])[:3]  # Limit to 3
 
     identity = merchant.get("identity", {})
     sub = merchant.get("subscription", {})
     perf = merchant.get("performance", {})
     signals = merchant.get("signals", [])
     cust_agg = merchant.get("customer_aggregate", {})
-    conv_hist = merchant.get("conversation_history", [])
-    merch_offers = merchant.get("offers", [])
-    review_themes = merchant.get("review_themes", [])
+    conv_hist = merchant.get("conversation_history", [])[-2:]  # Last 2 only
+    merch_offers = [o for o in merchant.get("offers", []) if o.get("status") == "active"][:2]
+    review_themes = merchant.get("review_themes", [])[:2]
 
     trigger_kind = trigger.get("kind", "")
     trigger_payload = trigger.get("payload", {})
@@ -163,93 +170,70 @@ def build_system_prompt(category: dict, merchant: dict, trigger: dict, customer:
     lang_pref = identity.get("languages", ["en"])
     use_hindi = "hi" in lang_pref
 
-    system = f"""You are Vera, magicpin's AI marketing assistant that messages merchants on WhatsApp.
+    # Format offers compactly
+    offer_str = ", ".join([f"{o['title']}" for o in offers]) if offers else "service offerings"
+    active_offers_str = ", ".join([f"{o['title']}" for o in merch_offers]) if merch_offers else "current offers"
 
-## YOUR ROLE
-Compose ONE WhatsApp message that will be sent to {"the merchant's customer" if trigger_scope == "customer" else "the merchant"}.
+    # Format digest as bullet points, not JSON
+    digest_str = "\n".join([f"• {d.get('title', '')}: {d.get('detail', '')[:60]}" for d in digest[:3]]) if digest else "(no digest)"
+
+    # Format review themes as summaries
+    theme_str = ", ".join([f"{t['theme']}({t['sentiment']})" for t in review_themes]) if review_themes else "mixed feedback"
+
+    # Compact signals
+    signals_str = ", ".join(signals[:5]) if signals else "no signals"
+
+    # Format conversation history compactly
+    conv_str = "\n".join([f"[{h['from']}]: {h.get('body', '')[:80]}" for h in conv_hist]) if conv_hist else "(no history)"
+
+    system = f"""You are Vera, magicpin's WhatsApp marketing assistant for merchants.
+
+## YOUR TASK
+Compose ONE short WhatsApp message ({("to " + customer.get('identity', {}).get('name', 'customer')) if customer else "to the merchant"}).
+Keep it punchy, specific, and end with ONE clear CTA.
 
 ## CATEGORY: {category.get("display_name", category.get("slug", ""))}
-Voice tone: {voice.get("tone", "")} | Register: {voice.get("register", "")}
-Language: {"Hindi-English code-mix welcome" if use_hindi else "English"} (match merchant's language preference)
-Allowed vocab: {", ".join(voice.get("vocab_allowed", [])[:8])}
-FORBIDDEN words: {", ".join(voice.get("vocab_taboo", []))}
+Tone: {voice.get("tone", "professional")} | {voice.get("register", "")}
+Language: {"Hindi-English mix OK" if use_hindi else "English"}
+Forbidden: {", ".join(voice.get("vocab_taboo", [])[:3])}
 
-## PEER BENCHMARKS (for context)
-{json.dumps(peer, indent=2)}
-
-## CATEGORY DIGEST (this week's knowledge items — cite sources, never hallucinate)
-{json.dumps(digest, indent=2)}
-
-## OFFER CATALOG (use service+price format like "Dental Cleaning @ ₹299", not "flat 30% off")
-{json.dumps(offers[:5], indent=2)}
-
-## SEASONAL CONTEXT
-{json.dumps(seasonal, indent=2)}
-
-## TREND SIGNALS
-{json.dumps(trends[:3], indent=2)}
-
-## PATIENT/CUSTOMER CONTENT LIBRARY (content the merchant can reshare)
-{json.dumps(patient_lib, indent=2)}
-
----
-
-## MERCHANT: {identity.get("name", "")}
-Owner: {owner_name} | City: {identity.get("city", "")} | Locality: {identity.get("locality", "")}
-Verified: {identity.get("verified", False)} | Plan: {sub.get("plan", "")} | Days remaining: {sub.get("days_remaining", "?")}
-Performance (30d): views={perf.get("views", 0)}, calls={perf.get("calls", 0)}, CTR={perf.get("ctr", 0):.3f} (peer avg CTR={peer.get("avg_ctr", 0):.3f})
-7d delta: {json.dumps(perf.get("delta_7d", {}))}
-Active offers: {[o["title"] for o in merch_offers if o.get("status") == "active"]}
-Signals: {signals}
-Customer aggregate: {json.dumps(cust_agg)}
-Review themes: {json.dumps(review_themes)}
-Recent conversation: {json.dumps(conv_hist[-3:] if conv_hist else [])}
-
----
+## MERCHANT
+{identity.get("name", "")}, {identity.get("city", "")} | Owner: {owner_name} | Status: {sub.get("plan", "active")}
+Performance: {perf.get('views', 0)} views, {perf.get('calls', 0)} calls (30d) | CTR: {perf.get('ctr', 0):.2%} vs peer avg {peer.get('avg_ctr', 0):.2%}
+Signals: {signals_str}
+Active offers: {active_offers_str}
+Recent feedback: {theme_str}
+Last message: {conv_str}
 
 ## TRIGGER
-Kind: {trigger_kind} | Urgency: {urgency}/5 | Source: {trigger.get("source", "")} | Scope: {trigger_scope}
-Payload: {json.dumps(trigger_payload, indent=2)}
+{trigger_kind.upper()} (urgency {urgency}/5) | Scope: {trigger_scope}
+Context: {json.dumps(trigger_payload) if trigger_payload else "standard"}
 
-{"## CUSTOMER (message is SENT ON BEHALF OF MERCHANT to this patient/customer)" + chr(10) + json.dumps(customer, indent=2) if customer else ""}
+## RULES
+1. No URLs, no links
+2. ONE CTA only, at the end
+3. No preamble ("I hope you're well")
+4. Use specifics: concrete numbers, dates, service names
+5. Max 160 words
+6. Service+price format: "Dental Cleaning @ ₹299" not "30% off"
+7. No hallucination - only mention offers/digest items that exist
+8. {("Send FROM merchant TO customer" if customer else "Send FROM Vera TO merchant")}
 
----
-
-## COMPOSITION RULES (follow exactly):
-1. **No URLs** — never include http:// or www links (Meta will reject)
-2. **One CTA only** — single call-to-action at the END of the message
-3. **No preamble** — don't say "I hope you're doing well" or "I'm reaching out"
-4. **No re-introduction** — don't say "This is Vera from magicpin" in follow-up messages
-5. **Specificity wins** — use concrete numbers, dates, source citations from the digest
-6. **Service+price format** — "Haircut @ ₹99" not "discount offer"
-7. **Category voice** — clinical/peer tone for dentists; warm/practical for salons; etc.
-8. **Language match** — {"use Hindi-English code-mix naturally" if use_hindi else "use English"}
-9. **No hallucination** — only cite digest items that exist in the context above
-10. **Max ~160 words** — WhatsApp-length, punchy
-11. If trigger is customer-scoped, write FROM the merchant's perspective to the customer
-12. Use emojis sparingly (1-2 max, only where natural)
-
-## COMPULSION LEVERS (use 1-2 per message):
-- Specificity: concrete numbers, dates, citations
-- Loss aversion: "before this window closes", "only X slots left"
-- Social proof: "3 dentists in your area did Y this month"
-- Effort externalization: "I've drafted it — just say go"
-- Curiosity: "Want to see the full list?"
-- Single binary commitment: Reply YES / Reply 1 for Wed (not multi-choice)
-
-## OUTPUT FORMAT
-Return ONLY the WhatsApp message text. No explanation, no "Here is the message:", no quotes around it."""
+Return ONLY the message text. No explanation."""
     return system
 
 
 def build_user_prompt(trigger_kind: str, merchant: dict, trigger: dict, customer: Optional[dict]) -> str:
     identity = merchant.get("identity", {})
     owner = identity.get("owner_first_name", "there")
-    return f"""Compose the WhatsApp message for trigger kind: {trigger_kind}
-Merchant owner name: {owner}
-{"Customer: " + (customer.get("identity", {}).get("name", "customer") if customer else "") }
+    cust_name = customer.get("identity", {}).get("name", "valued customer") if customer else ""
+    cust_info = f" to {cust_name}" if customer else ""
 
-Write the message now:"""
+    return f"""Trigger: {trigger_kind}
+Merchant: {owner}
+{f"Customer: {cust_name}" if customer else ""}
+
+Compose a compelling WhatsApp message now:"""
 
 
 async def compose_message(trigger: dict, merchant_id: str) -> Optional[dict]:
@@ -271,7 +255,7 @@ async def compose_message(trigger: dict, merchant_id: str) -> Optional[dict]:
     system = build_system_prompt(category, merchant, trigger, customer)
     user = build_user_prompt(trigger_kind, merchant, trigger, customer)
 
-    body = await call_gemini(system, user, max_tokens=400)
+    body = await call_gemini(system, user, max_tokens=800)
     if not body:
         return None
 
@@ -321,52 +305,47 @@ async def compose_reply(conversation_id: str, merchant_id: str, customer_id: Opt
     lang_pref = identity.get("languages", ["en"])
     use_hindi = "hi" in lang_pref
 
-    history_text = "\n".join([f"[{t['from']}]: {t['msg']}" for t in turn_history[-6:]])
+    history_text = "\n".join([f"[{t['from']}]: {t['msg'][:100]}" for t in turn_history[-4:]])
     last_sent = sent_bodies.get(conversation_id, "")
 
     voice = category.get("voice", {}) if category else {}
     digest = category.get("digest", []) if category else []
     offers = category.get("offer_catalog", []) if category else []
 
-    system = f"""You are Vera, magicpin's AI marketing assistant.
-You are replying to a message in an ongoing WhatsApp conversation with the merchant.
+    system = f"""You are Vera, magicpin's marketing assistant.
+Replying to {owner}'s message in an ongoing WhatsApp conversation.
 
-## MERCHANT
-Name: {identity.get("name", "")} | Owner: {owner} | Category: {cat_slug}
+## MERCHANT: {identity.get("name", "")} ({cat_slug}) | Owner: {owner}
 Language: {"Hindi-English code-mix" if use_hindi else "English"}
 
-## CONVERSATION HISTORY (most recent 6 turns)
+## CONVERSATION (last 4 turns)
 {history_text}
 
-## YOUR LAST MESSAGE (DO NOT REPEAT THIS VERBATIM)
-{last_sent}
+## YOUR LAST MESSAGE (never repeat verbatim)
+{last_sent[:150]}
 
-## AVAILABLE KNOWLEDGE
-Voice tone: {voice.get("tone", "")}
-Forbidden words: {voice.get("vocab_taboo", [])}
-Digest items: {json.dumps(digest[:3], indent=2)}
-Offer catalog: {json.dumps(offers[:4], indent=2)}
-Merchant signals: {merchant.get("signals", [])}
-Customer aggregate: {json.dumps(merchant.get("customer_aggregate", {}), indent=2)}
+## CONTEXT
+Available offers: {", ".join([f"{o['title']}" for o in offers[:3]])}
+Merchant signals: {", ".join(merchant.get("signals", [])[:3])}
 
 ## REPLY RULES
-1. No URLs
-2. One CTA at the end
-3. No preamble ("Great question!", "Absolutely!")
-4. If merchant said YES / committed / "let's do it" → immediately take action (draft something, confirm next step), don't ask another question
-5. If merchant asked a question → answer it concisely, then add a next-step CTA
-6. If merchant seems confused → clarify simply
-7. Max ~120 words
-8. Never repeat the exact previous message
-9. {"Use Hindi-English code-mix naturally" if use_hindi else "Use English"}
+1. Max 120 words, punchy
+2. One CTA at end
+3. No preamble
+4. If merchant said YES/committed → take action immediately, don't ask more questions
+5. If asked question → answer briefly, then CTA
+6. If confused → clarify simply
+7. Never repeat your last message
+8. No URLs
+9. {"Use Hindi-English naturally" if use_hindi else "Use English"}
 
-Return ONLY the reply message text. No explanation."""
+Return ONLY the reply message. No explanation."""
 
-    user_msg = f"""Merchant just replied: "{message}"
+    user_msg = f"""Merchant replied: "{message}"
 
 Write your reply now:"""
 
-    body = await call_gemini(system, user_msg, max_tokens=300)
+    body = await call_gemini(system, user_msg, max_tokens=600)
     if not body:
         body = f"Got it, {owner}! I'll take care of that. Anything else you need?"
 
@@ -512,22 +491,18 @@ async def reply(body: ReplyBody):
                 "rationale": "Merchant expressed frustration or opt-out. Closing gracefully."}
 
     # --- Explicit intent transition ---
-    if is_explicit_intent(message) and body.turn_number <= 4:
+    if is_explicit_intent(message) and body.turn_number <= 6:
         merchant = get_ctx("merchant", body.merchant_id or "")
         if merchant:
             identity = merchant.get("identity", {})
             owner = identity.get("owner_first_name", "there")
             agg = merchant.get("customer_aggregate", {})
-            high_risk = agg.get("high_risk_adult_count", agg.get("total_active_members", 0))
-            cat_slug = merchant.get("category_slug", "")
-            category = get_ctx("category", cat_slug)
-            offers = category.get("offer_catalog", []) if category else []
-            offer_ex = offers[0]["title"] if offers else "your top service"
+            customer_count = agg.get("high_risk_adult_count", agg.get("total_unique_ytd", 0))
 
             sent_bodies[conv_id] = f"action_confirmation_{conv_id}"
             return {
                 "action": "send",
-                "body": f"Perfect {owner}! Starting now — I'll draft the message for your {high_risk or 'active'} customers. Reply CONFIRM to send, or CHANGE to adjust.",
+                "body": f"Perfect {owner}! 🎯 Starting now — I'll draft the message for your {customer_count or 'active'} customers. Reply CONFIRM to send, or CHANGE to adjust.",
                 "cta": "binary_confirm_cancel",
                 "rationale": "Merchant explicitly committed. Switching from pitch to action mode immediately."
             }
