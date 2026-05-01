@@ -164,7 +164,7 @@ def build_system_prompt(category: dict, merchant: dict, trigger: dict, customer:
     trigger_kind = trigger.get("kind", "")
     trigger_payload = trigger.get("payload", {})
     urgency = trigger.get("urgency", 2)
-    trigger_scope = trigger.get("scope", "merchant")
+    trigger_scope = trigger.get("scope", "merchant") 
 
     owner_name = identity.get("owner_first_name", identity.get("name", "there"))
     lang_pref = identity.get("languages", ["en"])
